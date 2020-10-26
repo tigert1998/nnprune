@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from pruned_network import PrunedNetwork
+from pruning.pruned_network import PrunedNetwork
 
 
 class NetadaptPruner:

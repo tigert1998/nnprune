@@ -14,9 +14,13 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/tigert1998/pruning",
-    packages=setuptools.find_packages(),
+    packages=["pruning"],
+    license='MIT',
     classifiers=[
         "Programming Language :: Python :: 3",
+    ],
+    install_requires=[
+        "numpy"
     ],
     python_requires='>=3.5',
 )

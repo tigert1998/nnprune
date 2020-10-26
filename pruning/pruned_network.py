@@ -8,7 +8,7 @@ import torch
 from torch import nn
 import numpy as np
 
-from utils import cast_tuple_to_scalar
+from pruning.utils import cast_tuple_to_scalar
 
 
 OpConfig = namedtuple(
