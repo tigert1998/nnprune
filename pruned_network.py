@@ -1,5 +1,4 @@
-from typing import List, Dict, TypeVar, Union, Tuple, Optional
-from copy import deepcopy
+from typing import List, Dict, Optional
 import itertools
 import os
 import json
@@ -9,23 +8,14 @@ import torch
 from torch import nn
 import numpy as np
 
+from utils import cast_tuple_to_scalar
+
 
 OpConfig = namedtuple(
     "OpConfig", [
         "type", "cin", "cout", "height", "width",
         "ksize", "stride", "pad", "dilation"
     ])
-
-T = TypeVar('T')
-
-
-def _cast_tuple_to_scalar(v: Union[T, Tuple[T, ...]]):
-    if isinstance(v, tuple):
-        for i in range(1, len(v)):
-            assert v[i] == v[0]
-        return v[0]
-    else:
-        return v
 
 
 class PrunedNetwork(nn.Module):
@@ -47,14 +37,14 @@ class PrunedNetwork(nn.Module):
         self.effects = pruning_config["effects"]
         self.input_shapes = pruning_config["input_shapes"]
 
-    def _set_pruning_state(self, pruning_state: Dict[str, int]):
-        dic = self._get_pruning_state()
+    def set_pruning_state(self, pruning_state: Dict[str, int]):
+        dic = self.get_pruning_state()
         for pruning_point, channels in pruning_state.items():
             self.prune(pruning_point, list(range(
                 dic[pruning_point] - channels
             )))
 
-    def _get_pruning_state(self) -> Dict[str, int]:
+    def get_pruning_state(self) -> Dict[str, int]:
         """Get pruning state
         Returns:
             a dict which maps operator name (pruning point) to remaining output channels
@@ -75,11 +65,11 @@ class PrunedNetwork(nn.Module):
     def load_pruning_state(self, path: str):
         with open(path, "r") as f:
             pruning_state = json.load(f)
-            self._set_pruning_state(pruning_state)
+            self.set_pruning_state(pruning_state)
 
     def save_pruning_state(self, path: str):
         with open(path, "w") as f:
-            json.dump(self._get_pruning_state(), f)
+            json.dump(self.get_pruning_state(), f)
 
     def forward(self, *args, **kwargs):
         return self.network(*args, **kwargs)
@@ -302,10 +292,10 @@ class PrunedNetwork(nn.Module):
             layer = self.get_model_attr_by_name(name)
             assert isinstance(layer, nn.Conv2d)
             common_dic.update({
-                "ksize": _cast_tuple_to_scalar(layer.kernel_size),
-                "stride": _cast_tuple_to_scalar(layer.stride),
-                "pad": _cast_tuple_to_scalar(layer.padding),
-                "dilation": _cast_tuple_to_scalar(layer.dilation),
+                "ksize": cast_tuple_to_scalar(layer.kernel_size),
+                "stride": cast_tuple_to_scalar(layer.stride),
+                "pad": cast_tuple_to_scalar(layer.padding),
+                "dilation": cast_tuple_to_scalar(layer.dilation),
             })
 
             return OpConfig(
