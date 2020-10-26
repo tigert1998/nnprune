@@ -1,7 +1,7 @@
 import os.path as osp
 import json
 from copy import deepcopy
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,40 +15,22 @@ class NetadaptPruner:
 
     Args:
         unpruned_model: unpruned model
-        model_constructor: A function that returns the skeleton of the model to prune
         pruning_config_path: pruning_config path for unpruned_model
         pruning_plan: A dict that defines the pruning process. Available keys:
             step: the alignment of channels for the pruned model;
             delta_resource: the least resource reduction in a round of pruning;
             resource_budget: resource budget;
             delta_resource_decay: delta_resource decay rate. Default: 1 (no decay)
-        resource_evaluator: A function that returns the resource consumed by the model
-        accuracy_evaluator: A function that returns the accuracy of the model
-        finetuner: A function that finetunes the model. An additional string parameter
-            will be passed to distinguish whether it is long term or short term finetune.
-            The former one is "long" while the other is "short".
         work_dir: the work directory to save log and checkpoints
-        tmp_file_cleaner: A function to clean tmp files after each iteration. Arguments:
-            work_dir: work dir to clean;
-            iteration: current iteration number.
-        get_logger: A function that takes the following arguments and returns a logger:
-            work_dir: work dir to save log.
     """
 
     def __init__(
         self,
         unpruned_model: nn.Module,
-        model_constructor: Callable[[], nn.Module],
         pruning_config_path: str,
         pruning_plan: dict,
-        resource_evaluator: Callable[[PrunedNetwork], float],
-        accuracy_evaluator: Callable[[PrunedNetwork], float],
-        finetuner: Callable[[PrunedNetwork, str], None],
         work_dir: str,
-        tmp_file_cleaner: Callable[[str, int], None],
-        get_logger: Callable[[str], None],
     ):
-        self.model_constructor = model_constructor
         self.pruning_config_path = pruning_config_path
         with open(self.pruning_config_path, "r") as f:
             self.pruning_config = json.load(f)
@@ -57,20 +39,34 @@ class NetadaptPruner:
         self.pruning_points = list(self.model.dependencies.keys())
 
         self.pruning_plan = pruning_plan
-        self.resource_evaluator = resource_evaluator
-        self.accuracy_evaluator = accuracy_evaluator
-        self.finetuner = finetuner
         self.work_dir = work_dir
 
         self.num_gpus = torch.cuda.device_count()
         self.rank, self.work_size = dist.get_rank(), dist.get_world_size()
 
-        self.tmp_file_cleaner = tmp_file_cleaner
-        self.logger = get_logger(self.work_dir)
+        self.logger = self.get_logger()
         self.iteration = None
 
+    def construct_model(self) -> nn.Module:
+        raise NotImplementedError()
+
+    def evaluate_resource(self, model: PrunedNetwork) -> float:
+        raise NotImplementedError()
+
+    def evaluate_accuracy(self, model: PrunedNetwork) -> float:
+        raise NotImplementedError()
+
+    def finetune(self, model: PrunedNetwork, term: str):
+        raise NotImplementedError()
+
+    def clean_tmp_files(self):
+        raise NotImplementedError()
+
+    def get_logger(self):
+        raise NotImplementedError()
+
     def run(self):
-        resource = self.resource_evaluator(self.model)
+        resource = self.evaluate_resource(self.model)
 
         delta_resource = self.pruning_plan["delta_resource"]
         resource_budget = self.pruning_plan["resource_budget"]
@@ -105,7 +101,7 @@ class NetadaptPruner:
             self.logger.info(
                 "[iteration #{}] finish short term finetune".format(self.iteration))
 
-            self.tmp_file_cleaner(self.work_dir, self.iteration)
+            self.clean_tmp_files()
 
             delta_resource *= delta_resource_decay
             self.iteration += 1
@@ -120,19 +116,19 @@ class NetadaptPruner:
 
     def _long_term_finetune(self):
         torch.cuda.empty_cache()
-        self.finetuner(self.model, "long")
+        self.finetune(self.model, "long")
         self._save_model(self.model, "pruning_result")
 
     def _short_term_finetune(self):
         torch.cuda.empty_cache()
-        self.finetuner(self.model, "short")
+        self.finetune(self.model, "short")
         self._save_model(self.model, self._get_ckpt_name(self.iteration))
 
     def _load_model(self, ckpt_name: str):
         if hasattr(self, "model"):
             del self.model
 
-        model = self.model_constructor()
+        model = self.construct_model()
         self.model = PrunedNetwork(model, self.pruning_config)
         ckpt_path_noext = osp.join(self.work_dir, ckpt_name)
         self.model.load_pruning_state("{}.json".format(ckpt_path_noext))
@@ -173,7 +169,7 @@ class NetadaptPruner:
         )
 
         for i in range(min_channels_to_prune, cout, step):
-            resource = self.resource_evaluator(new_model)
+            resource = self.evaluate_resource(new_model)
             if resource <= target_resource:
                 break
             if i + step < cout:
@@ -182,7 +178,7 @@ class NetadaptPruner:
                     new_model.select_channel_idxs(pruning_point, step)
                 )
 
-        accuracy = self.accuracy_evaluator(new_model)
+        accuracy = self.evaluate_accuracy(new_model)
         return new_model, accuracy, resource
 
     def _select_best_pruning_point(self, target_resource: float) -> float:
