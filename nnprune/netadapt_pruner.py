@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from pruning.pruned_network import PrunedNetwork
+from nnprune.pruned_network import PrunedNetwork
 
 
 class NetadaptPruner:
@@ -28,12 +28,11 @@ class NetadaptPruner:
             will be passed to distinguish whether it is long term or short term finetune.
             The former one is "long" while the other is "short".
         work_dir: the work directory to save log and checkpoints
-        tmp_file_cleaner: subroutine to clean tmp files after each iteration. Arguments:
+        tmp_file_cleaner: A function to clean tmp files after each iteration. Arguments:
             work_dir: work dir to clean;
             iteration: current iteration number.
         get_logger: A function that takes the following arguments and returns a logger:
-            work_dir: work dir to save log;
-            rank: the rank in the context of distributed training.
+            work_dir: work dir to save log.
     """
 
     def __init__(
@@ -47,7 +46,7 @@ class NetadaptPruner:
         finetuner: Callable[[PrunedNetwork, str], None],
         work_dir: str,
         tmp_file_cleaner: Callable[[str, int], None],
-        get_logger: Callable[[str, int], None],
+        get_logger: Callable[[str], None],
     ):
         self.model_constructor = model_constructor
         self.pruning_config_path = pruning_config_path
@@ -67,7 +66,7 @@ class NetadaptPruner:
         self.rank, self.work_size = dist.get_rank(), dist.get_world_size()
 
         self.tmp_file_cleaner = tmp_file_cleaner
-        self.logger = get_logger(self.work_dir, self.rank)
+        self.logger = get_logger(self.work_dir)
         self.iteration = None
 
     def run(self):

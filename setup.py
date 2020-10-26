@@ -6,15 +6,15 @@ with open("README.md", "r") as f:
     long_description = f.read()
 
 setuptools.setup(
-    name="pruning",
+    name="nnprune",
     version=VERSION,
     author="Xiaohu Tang",
     author_email="tigertang.zju@outlook.com",
     description="A tool to prune neural networks",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/tigert1998/pruning",
-    packages=["pruning"],
+    url="https://github.com/tigert1998/nnprune",
+    packages=["nnprune"],
     license='MIT',
     classifiers=[
         "Programming Language :: Python :: 3",
