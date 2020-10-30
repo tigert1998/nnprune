@@ -2,7 +2,7 @@ import os
 import os.path as osp
 import json
 from copy import deepcopy
-from typing import Optional, Tuple
+from typing import Optional
 import pickle
 from tempfile import mkstemp
 import shutil
@@ -69,6 +69,9 @@ class NetadaptPruner:
     def get_logger(self):
         raise NotImplementedError()
 
+    def _log_with_iter(self, msg):
+        self.logger.info("[iteration #{}] {}".format(self.iteration, msg))
+
     def run(self):
         resource = self.evaluate_resource(self.model)
 
@@ -91,8 +94,7 @@ class NetadaptPruner:
             "resume pruning from iteration #{}".format(self.iteration))
 
         while resource > resource_budget:
-            self.logger.info("[iteration #{}] delta_resource_decay = {}".format(
-                self.iteration, delta_resource_decay))
+            self._log_with_iter("delta_resource = {}".format(delta_resource))
 
             while True:
                 target_resource = resource - delta_resource
@@ -105,15 +107,11 @@ class NetadaptPruner:
                     resource = tmp
                     break
 
-            self.logger.info(
-                "[iteration #{}] pruning progress: resource: {}; budget: {}".format(
-                    self.iteration, resource, resource_budget
-                ))
-            self.logger.info(
-                "[iteration #{}] start short term finetune".format(self.iteration))
+            self._log_with_iter("pruning progress: resource: {}; budget: {}".format(
+                resource, resource_budget))
+            self._log_with_iter("start short term finetune")
             self._short_term_finetune()
-            self.logger.info(
-                "[iteration #{}] finish short term finetune".format(self.iteration))
+            self._log_with_iter("finish short term finetune")
 
             self.clean_tmp_files()
 
@@ -177,6 +175,8 @@ class NetadaptPruner:
             accuracy: accuracy
             resource: final resource consumption (which should <= target_resource)
         """
+        self._log_with_iter(
+            "evaluating pruning point: {}".format(pruning_point))
         step = self.pruning_plan["step"]
         cout = self.model.get_op_config(pruning_point).cout
         min_channels_to_prune = cout - cout // step * step
@@ -184,6 +184,7 @@ class NetadaptPruner:
             min_channels_to_prune = step
 
         new_model = deepcopy(self.model)
+        new_model.to("cpu")
         new_model.prune(
             pruning_point,
             new_model.select_channel_idxs(pruning_point, min_channels_to_prune)
@@ -195,6 +196,7 @@ class NetadaptPruner:
             if resource <= target_resource:
                 break
             if i + step < cout:
+                new_model.to("cpu")
                 new_model.prune(
                     pruning_point,
                     new_model.select_channel_idxs(pruning_point, step)
@@ -204,11 +206,14 @@ class NetadaptPruner:
             return {key: None for key in ["channels", "accuracy", "resource"]}
 
         accuracy = self.evaluate_accuracy(new_model)
-        return {"channels": i, "accuracy": accuracy, "resource": resource}
+        ret = {"channels": i, "accuracy": accuracy, "resource": resource}
+        self._log_with_iter(
+            "pruning point {} evaluation result: {}".format(pruning_point, ret))
+        return ret
 
     def _select_best_pruning_point(self, target_resource: float) -> Optional[float]:
-        self.logger.info("[iteration #{}] select_best_pruning_point(target_resource={})".format(
-            self.iteration, target_resource))
+        self._log_with_iter("select_best_pruning_point(target_resource={})".format(
+            target_resource))
 
         candidate_info_dic_path = osp.join(
             self.work_dir, self._get_ckpt_name(self.iteration) + "_candidates.pkl")
@@ -225,8 +230,8 @@ class NetadaptPruner:
                 candidate = self._evaluate_pruning_point(
                     pruning_point, target_resource)
             if candidate["channels"] is None:
-                self.logger.info("[iteration #{}] skip pruning point {}".format(
-                    self.iteration, pruning_point))
+                self._log_with_iter(
+                    "skip pruning point {}".format(pruning_point))
             candidate_info_dic[pruning_point] = candidate
             fd, path = mkstemp()
             with open(path, "wb") as f:
@@ -244,16 +249,16 @@ class NetadaptPruner:
                 best_pruning_point = pruning_point
 
         if best_pruning_point is None:
-            self.logger.warning(
-                "[iteration #{}] no pruning point matches the resource budget")
+            self._log_with_iter("no pruning point matches the resource budget")
             return None
 
-        self.logger.info("[iteration #{}] select pruning point {}".format(
-            self.iteration, best_pruning_point))
+        self._log_with_iter(
+            "select pruning point {}".format(best_pruning_point))
 
         best_candidate_info_dic = candidate_info_dic[best_pruning_point]
         channels, resource = best_candidate_info_dic["channels"], best_candidate_info_dic["resource"]
 
+        self.model.to("cpu")
         self.model.prune(
             best_pruning_point,
             self.model.select_channel_idxs(
