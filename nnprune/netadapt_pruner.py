@@ -1,7 +1,11 @@
+import os
 import os.path as osp
 import json
 from copy import deepcopy
 from typing import Optional, Tuple
+import pickle
+from tempfile import mkstemp
+import shutil
 
 import torch
 import torch.nn as nn
@@ -78,7 +82,8 @@ class NetadaptPruner:
             ckpt_name = self._get_ckpt_name(self.iteration)
             if not osp.exists(osp.join(self.work_dir, ckpt_name + ".pth")):
                 if self.iteration >= 1:
-                    self._load_model(self._get_ckpt_name(self.iteration - 1))
+                    resource = self._load_model(
+                        self._get_ckpt_name(self.iteration - 1))["resource"]
                 break
             self.iteration += 1
 
@@ -86,10 +91,19 @@ class NetadaptPruner:
             "resume pruning from iteration #{}".format(self.iteration))
 
         while resource > resource_budget:
-            self.logger.info("[iteration #{}]".format(self.iteration))
+            self.logger.info("[iteration #{}] delta_resource_decay = {}".format(
+                self.iteration, delta_resource_decay))
 
-            target_resource = resource - delta_resource
-            resource = self._select_best_pruning_point(target_resource)
+            while True:
+                target_resource = resource - delta_resource
+                tmp = self._select_best_pruning_point(target_resource)
+                if tmp is None and delta_resource_decay >= 1:
+                    self.logger.info("pruning process ends")
+                    return
+                delta_resource *= delta_resource_decay
+                if tmp is not None:
+                    resource = tmp
+                    break
 
             self.logger.info(
                 "[iteration #{}] pruning progress: resource: {}; budget: {}".format(
@@ -103,7 +117,6 @@ class NetadaptPruner:
 
             self.clean_tmp_files()
 
-            delta_resource *= delta_resource_decay
             self.iteration += 1
 
         self.logger.info("start long term finetune")
@@ -124,7 +137,7 @@ class NetadaptPruner:
         self.finetune(self.model, "short")
         self._save_model(self.model, self._get_ckpt_name(self.iteration))
 
-    def _load_model(self, ckpt_name: str):
+    def _load_model(self, ckpt_name: str) -> dict:
         if hasattr(self, "model"):
             del self.model
 
@@ -136,6 +149,8 @@ class NetadaptPruner:
             torch.load("{}.pth".format(ckpt_path_noext))["state_dict"]
         )
         self.model.to("cpu")
+        with open(osp.join(ckpt_path_noext + ".pkl"), "rb") as f:
+            return pickle.load(f)
 
     def _save_model(self, model: PrunedNetwork, ckpt_name: str):
         if self.rank == 0:
@@ -145,14 +160,20 @@ class NetadaptPruner:
                 "{}.pth".format(ckpt_path_noext)
             )
             model.save_pruning_state("{}.json".format(ckpt_path_noext))
+            with open(osp.join(ckpt_path_noext + ".pkl"), "wb") as f:
+                pickle.dump({
+                    "resource": self.evaluate_resource(model),
+                    "accuracy": self.evaluate_accuracy(model),
+                }, f)
         dist.barrier()
 
-    def _evaluate_pruning_point(self, pruning_point: str, target_resource: float) -> Tuple[PrunedNetwork, float, float]:
+    def _evaluate_pruning_point(self, pruning_point: str, target_resource: float) -> dict:
         """evaluate pruning point
         Args:
             pruning_point: pruning point to evaluate
+            target_resource: target resource
         Returns:
-            network: pruned network
+            channels: #pruned channels
             accuracy: accuracy
             resource: final resource consumption (which should <= target_resource)
         """
@@ -168,6 +189,7 @@ class NetadaptPruner:
             new_model.select_channel_idxs(pruning_point, min_channels_to_prune)
         )
 
+        resource = None
         for i in range(min_channels_to_prune, cout, step):
             resource = self.evaluate_resource(new_model)
             if resource <= target_resource:
@@ -178,26 +200,63 @@ class NetadaptPruner:
                     new_model.select_channel_idxs(pruning_point, step)
                 )
 
+        if resource is None or resource > target_resource:
+            return {key: None for key in ["channels", "accuracy", "resource"]}
+
         accuracy = self.evaluate_accuracy(new_model)
-        return new_model, accuracy, resource
+        return {"channels": i, "accuracy": accuracy, "resource": resource}
 
-    def _select_best_pruning_point(self, target_resource: float) -> float:
-        best_candidate: Optional[Tuple[int, PrunedNetwork, float, float]] \
-            = None
+    def _select_best_pruning_point(self, target_resource: float) -> Optional[float]:
+        self.logger.info("[iteration #{}] select_best_pruning_point(target_resource={})".format(
+            self.iteration, target_resource))
 
-        for idx, pruning_point in enumerate(self.pruning_points):
-            model, accuracy, resource = \
-                self._evaluate_pruning_point(pruning_point, target_resource)
-            new_candidate = (idx, model, accuracy, resource)
-            if best_candidate is None:
-                best_candidate = new_candidate
-            elif accuracy > best_candidate[2]:
-                best_candidate = new_candidate
+        candidate_info_dic_path = osp.join(
+            self.work_dir, self._get_ckpt_name(self.iteration) + "_candidates.pkl")
+        if osp.exists(candidate_info_dic_path):
+            with open(candidate_info_dic_path, "rb") as f:
+                candidate_info_dic = pickle.load(f)
+        else:
+            candidate_info_dic = {}
 
-        idx = best_candidate[0]
+        for pruning_point in self.pruning_points:
+            if pruning_point in candidate_info_dic:
+                candidate = candidate_info_dic[pruning_point]
+            else:
+                candidate = self._evaluate_pruning_point(
+                    pruning_point, target_resource)
+            if candidate["channels"] is None:
+                self.logger.info("[iteration #{}] skip pruning point {}".format(
+                    self.iteration, pruning_point))
+            candidate_info_dic[pruning_point] = candidate
+            fd, path = mkstemp()
+            with open(path, "wb") as f:
+                pickle.dump(candidate_info_dic, f)
+            os.close(fd)
+            shutil.move(path, candidate_info_dic_path)
+
+        best_pruning_point = None
+        for pruning_point, info_dic in candidate_info_dic.items():
+            if info_dic["accuracy"] is None:
+                continue
+            if best_pruning_point is None:
+                best_pruning_point = pruning_point
+            elif info_dic["accuracy"] > candidate_info_dic[best_pruning_point]["accuracy"]:
+                best_pruning_point = pruning_point
+
+        if best_pruning_point is None:
+            self.logger.warning(
+                "[iteration #{}] no pruning point matches the resource budget")
+            return None
 
         self.logger.info("[iteration #{}] select pruning point {}".format(
-            self.iteration, self.pruning_points[idx]))
+            self.iteration, best_pruning_point))
 
-        self.model = best_candidate[1]
-        return best_candidate[3]
+        best_candidate_info_dic = candidate_info_dic[best_pruning_point]
+        channels, resource = best_candidate_info_dic["channels"], best_candidate_info_dic["resource"]
+
+        self.model.prune(
+            best_pruning_point,
+            self.model.select_channel_idxs(
+                best_pruning_point, channels
+            ))
+        return resource
