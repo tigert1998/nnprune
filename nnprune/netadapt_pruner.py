@@ -143,7 +143,7 @@ class NetadaptPruner:
         self.model = PrunedNetwork(model, self.pruning_config)
         ckpt_path_noext = osp.join(self.work_dir, ckpt_name)
         self.model.load_pruning_state("{}.json".format(ckpt_path_noext))
-        self.model.load_state_dict(
+        self.model.network.load_state_dict(
             torch.load("{}.pth".format(ckpt_path_noext))["state_dict"]
         )
         self.model.to("cpu")
