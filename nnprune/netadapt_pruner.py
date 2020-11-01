@@ -6,6 +6,7 @@ from typing import Optional
 import pickle
 from tempfile import mkstemp
 import shutil
+import logging
 
 import torch
 import torch.nn as nn
@@ -69,8 +70,12 @@ class NetadaptPruner:
     def get_logger(self):
         raise NotImplementedError()
 
-    def _log_with_iter(self, msg):
-        self.logger.info("[iteration #{}] {}".format(self.iteration, msg))
+    def _log_with_iter(self, msg, level=logging.INFO):
+        if self.iteration is None:
+            iteration_str = "[iteration unknown]"
+        else:
+            iteration_str = "[iteration #{}]".format(self.iteration)
+        self.logger.log(level, "{} {}".format(iteration_str, msg))
 
     def run(self):
         resource = self.evaluate_resource(self.model)
