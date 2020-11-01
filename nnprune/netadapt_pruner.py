@@ -5,7 +5,6 @@ from copy import deepcopy
 from typing import Optional
 import pickle
 from tempfile import mkstemp
-import shutil
 import logging
 
 import torch
@@ -238,11 +237,13 @@ class NetadaptPruner:
                 self._log_with_iter(
                     "skip pruning point {}".format(pruning_point))
             candidate_info_dic[pruning_point] = candidate
-            fd, path = mkstemp()
-            with open(path, "wb") as f:
-                pickle.dump(candidate_info_dic, f)
-            os.close(fd)
-            shutil.move(path, candidate_info_dic_path)
+            if self.rank == 0:
+                fd, path = mkstemp(dir=self.work_dir)
+                with open(path, "wb") as f:
+                    pickle.dump(candidate_info_dic, f)
+                os.close(fd)
+                # ensure atomic move
+                os.rename(path, candidate_info_dic_path)
 
         best_pruning_point = None
         for pruning_point, info_dic in candidate_info_dic.items():
