@@ -77,8 +77,6 @@ class NetadaptPruner:
         self.logger.log(level, "{} {}".format(iteration_str, msg))
 
     def run(self):
-        resource = self.evaluate_resource(self.model)
-
         delta_resource = self.pruning_plan["delta_resource"]
         resource_budget = self.pruning_plan["resource_budget"]
         delta_resource_decay = self.pruning_plan.get("delta_resource_decay", 1)
@@ -91,6 +89,8 @@ class NetadaptPruner:
                 if self.iteration >= 1:
                     resource = self._load_model(
                         self._get_ckpt_name(self.iteration - 1))["resource"]
+                else:
+                    resource = self.evaluate_resource(self.model)
                 break
             self.iteration += 1
 
@@ -155,6 +155,8 @@ class NetadaptPruner:
             return pickle.load(f)
 
     def _save_model(self, model: PrunedNetwork, ckpt_name: str):
+        resource = self.evaluate_resource(model)
+        accuracy = self.evaluate_accuracy(model)
         if self.rank == 0:
             ckpt_path_noext = osp.join(self.work_dir, ckpt_name)
             torch.save(
@@ -164,8 +166,8 @@ class NetadaptPruner:
             model.save_pruning_state("{}.json".format(ckpt_path_noext))
             with open(osp.join(ckpt_path_noext + ".pkl"), "wb") as f:
                 pickle.dump({
-                    "resource": self.evaluate_resource(model),
-                    "accuracy": self.evaluate_accuracy(model),
+                    "resource": resource,
+                    "accuracy": accuracy,
                 }, f)
         dist.barrier()
 
@@ -262,7 +264,9 @@ class NetadaptPruner:
             "select pruning point {}".format(best_pruning_point))
 
         best_candidate_info_dic = candidate_info_dic[best_pruning_point]
-        channels, resource = best_candidate_info_dic["channels"], best_candidate_info_dic["resource"]
+        channels, resource = \
+            best_candidate_info_dic["channels"], \
+            best_candidate_info_dic["resource"]
 
         self.model.to("cpu")
         self.model.prune(
