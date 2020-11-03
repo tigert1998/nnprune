@@ -154,21 +154,27 @@ class NetadaptPruner:
         with open(osp.join(ckpt_path_noext + ".pkl"), "rb") as f:
             return pickle.load(f)
 
+    def _save_model_nosync(
+        self, model: PrunedNetwork, ckpt_name: str,
+        resource: float, accuracy: float
+    ):
+        ckpt_path_noext = osp.join(self.work_dir, ckpt_name)
+        torch.save(
+            {"state_dict": model.state_dict()},
+            "{}.pth".format(ckpt_path_noext)
+        )
+        model.save_pruning_state("{}.json".format(ckpt_path_noext))
+        with open(osp.join(ckpt_path_noext + ".pkl"), "wb") as f:
+            pickle.dump({
+                "resource": resource,
+                "accuracy": accuracy,
+            }, f)
+
     def _save_model(self, model: PrunedNetwork, ckpt_name: str):
         resource = self.evaluate_resource(model)
         accuracy = self.evaluate_accuracy(model)
         if self.rank == 0:
-            ckpt_path_noext = osp.join(self.work_dir, ckpt_name)
-            torch.save(
-                {"state_dict": model.state_dict()},
-                "{}.pth".format(ckpt_path_noext)
-            )
-            model.save_pruning_state("{}.json".format(ckpt_path_noext))
-            with open(osp.join(ckpt_path_noext + ".pkl"), "wb") as f:
-                pickle.dump({
-                    "resource": resource,
-                    "accuracy": accuracy,
-                }, f)
+            self._save_model_nosync(model, ckpt_name, resource, accuracy)
         dist.barrier()
 
     def _evaluate_pruning_point(self, pruning_point: str, target_resource: float) -> dict:
@@ -264,14 +270,26 @@ class NetadaptPruner:
             "select pruning point {}".format(best_pruning_point))
 
         best_candidate_info_dic = candidate_info_dic[best_pruning_point]
-        channels, resource = \
+        channels, resource, accuracy = \
             best_candidate_info_dic["channels"], \
-            best_candidate_info_dic["resource"]
+            best_candidate_info_dic["resource"], \
+            best_candidate_info_dic["accuracy"]
 
-        self.model.to("cpu")
-        self.model.prune(
-            best_pruning_point,
-            self.model.select_channel_idxs(
-                best_pruning_point, channels
-            ))
+        # enforce sync model through disk
+        if self.rank == 0:
+            self.model.to("cpu")
+            self.model.prune(
+                best_pruning_point,
+                self.model.select_channel_idxs(
+                    best_pruning_point, channels
+                ))
+            self._save_model_nosync(self.model, "tmp", resource, accuracy)
+        dist.barrier()
+        resource = self._load_model("tmp")["resource"]
+        dist.barrier()
+        if self.rank == 0:
+            ckpt_path_noext = osp.join(self.work_dir, "tmp")
+            for ext in ["pth", "json", "pkl"]:
+                os.remove(ckpt_path_noext + "." + ext)
+
         return resource
